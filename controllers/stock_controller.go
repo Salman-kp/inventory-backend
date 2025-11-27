@@ -2,127 +2,125 @@ package controllers
 
 import (
 	"net/http"
+	"strconv"
+	"time"
 
 	"inventory-backend/services"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 )
 
-type StockController struct {
-	service *services.StockService
-}
-
-func NewStockController(s *services.StockService) *StockController {
-	return &StockController{service: s}
-}
-
-type StockRequest struct {
-	ProductID    string `json:"product_id" binding:"required"`
-	SubVariantID string `json:"sub_variant_id" binding:"required"`
-	Quantity     string `json:"quantity" binding:"required"`
-}
-
-// POST /stock/add
-func (sc *StockController) AddStock(c *gin.Context) {
-	var req StockRequest
-
+// POST /api/stock/in
+func AddStockHandler(c *gin.Context) {
+	var req services.StockChangeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "invalid request: " + err.Error(),
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Message: "invalid request body",
+			Details: err.Error(),
 		})
 		return
 	}
 
-	productUUID, err := uuid.Parse(req.ProductID)
+	tx, err := services.AddStock(req)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid product_id"})
-		return
-	}
-
-	subUUID, err := uuid.Parse(req.SubVariantID)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid sub_variant_id"})
-		return
-	}
-
-	qty, err := decimal.NewFromString(req.Quantity)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid quantity"})
-		return
-	}
-
-	if err := sc.service.AddStock(productUUID, subUUID, qty); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": err.Error(),
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "stock added successfully"})
-}
-
-// POST /stock/remove
-func (sc *StockController) RemoveStock(c *gin.Context) {
-	var req StockRequest
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "invalid request: " + err.Error(),
-		})
-		return
-	}
-
-	productUUID, err := uuid.Parse(req.ProductID)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid product_id"})
-		return
-	}
-
-	subUUID, err := uuid.Parse(req.SubVariantID)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid sub_variant_id"})
-		return
-	}
-
-	qty, err := decimal.NewFromString(req.Quantity)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid quantity"})
-		return
-	}
-
-	if err := sc.service.RemoveStock(productUUID, subUUID, qty); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": err.Error(),
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "stock removed successfully"})
-}
-
-// GET /stock/report?from=2024-01-01&to=2025-01-01
-func (sc *StockController) StockReport(c *gin.Context) {
-	from := c.Query("from")
-	to := c.Query("to")
-
-	if from == "" || to == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "from and to query params are required",
-		})
-		return
-	}
-
-	logs, err := sc.service.StockReport(from, to)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "failed to fetch stock report: " + err.Error(),
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Message: "failed to add stock",
+			Details: err.Error(),
 		})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"data": logs,
+		"message": "stock added successfully",
+		"data":    tx,
+	})
+}
+
+// POST /api/stock/out
+func RemoveStockHandler(c *gin.Context) {
+	var req services.StockChangeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Message: "invalid request body",
+			Details: err.Error(),
+		})
+		return
+	}
+
+	tx, err := services.RemoveStock(req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Message: "failed to remove stock",
+			Details: err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "stock removed successfully",
+		"data":    tx,
+	})
+}
+
+// GET /api/stock/report?from=2025-11-01&to=2025-11-30&page=1&limit=20
+func StockReportHandler(c *gin.Context) {
+	fromStr := c.Query("from")
+	toStr := c.Query("to")
+
+	if fromStr == "" || toStr == "" {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Message: "from and to query params are required (YYYY-MM-DD)",
+		})
+		return
+	}
+
+	from, err := time.Parse("2006-01-02", fromStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Message: "invalid from date format",
+			Details: err.Error(),
+		})
+		return
+	}
+
+	to, err := time.Parse("2006-01-02", toStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Message: "invalid to date format",
+			Details: err.Error(),
+		})
+		return
+	}
+	to = to.Add(24 * time.Hour) // include full 'to' day
+
+	page := 1
+	limit := 20
+	if v := c.Query("page"); v != "" {
+		if p, err := strconv.Atoi(v); err == nil {
+			page = p
+		}
+	}
+	if v := c.Query("limit"); v != "" {
+		if l, err := strconv.Atoi(v); err == nil {
+			limit = l
+		}
+	}
+
+	report, err := services.GetStockReport(from, to, page, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Message: "failed to get stock report",
+			Details: err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"transactions": report.Transactions,
+		"total_in":     report.TotalIn,
+		"total_out":    report.TotalOut,
+		"net":          report.Net,
+		"page":         page,
+		"limit":        limit,
 	})
 }

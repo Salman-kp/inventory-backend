@@ -6,19 +6,18 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func RegisterRoutes(
-	r *gin.Engine,
-	productController *controllers.ProductController,
-	stockController *controllers.StockController,
-) {
+func RegisterRoutes(r *gin.Engine) {
+	api := r.Group("/api")
+	{
+		// Products
+		api.POST("/products", controllers.CreateProductHandler)
+		api.GET("/products", controllers.ListProductsHandler)
 
+		// Stock
+		api.POST("/stock/in", controllers.AddStockHandler)
+		api.POST("/stock/out", controllers.RemoveStockHandler)
 
-	// Product APIs
-	r.POST("/products", productController.CreateProduct)
-	r.GET("/products", productController.ListProducts)
-
-	// Stock APIs
-	r.POST("/stock/add", stockController.AddStock)
-	r.POST("/stock/remove", stockController.RemoveStock)
-	r.GET("/stock/report", stockController.StockReport)
+		// Stock report
+		api.GET("/stock/report", controllers.StockReportHandler)
+	}
 }

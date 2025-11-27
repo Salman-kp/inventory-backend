@@ -4,6 +4,7 @@ import (
 	"errors"
 	"time"
 
+	"inventory-backend/config"
 	"inventory-backend/models"
 
 	"github.com/google/uuid"
@@ -12,126 +13,150 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-type StockService struct {
-	db *gorm.DB
+type StockChangeRequest struct {
+	ProductID    string `json:"product_id" binding:"required"`     // Product.ID (UUID)
+	SubVariantID string `json:"sub_variant_id" binding:"required"` // SubVariant.ID (UUID)
+	Quantity     string `json:"quantity" binding:"required"`       // decimal as string
 }
 
-func NewStockService(db *gorm.DB) *StockService {
-	return &StockService{db: db}
+type StockReport struct {
+	Transactions []models.StockTransaction `json:"transactions"`
+	TotalIn      decimal.Decimal           `json:"total_in"`
+	TotalOut     decimal.Decimal           `json:"total_out"`
+	Net          decimal.Decimal           `json:"net"`
 }
 
-// AddStock performs a stock-in operation with row-level locking
-func (s *StockService) AddStock(productID, subVariantID uuid.UUID, qty decimal.Decimal) error {
+func AddStock(req StockChangeRequest) (*models.StockTransaction, error) {
+	return changeStock(req, "IN")
+}
+
+func RemoveStock(req StockChangeRequest) (*models.StockTransaction, error) {
+	return changeStock(req, "OUT")
+}
+
+func changeStock(req StockChangeRequest, txType string) (*models.StockTransaction, error) {
+	db := config.DB
+
+	productUUID, err := uuid.Parse(req.ProductID)
+	if err != nil {
+		return nil, errors.New("invalid product_id")
+	}
+	subVariantUUID, err := uuid.Parse(req.SubVariantID)
+	if err != nil {
+		return nil, errors.New("invalid sub_variant_id")
+	}
+	qty, err := decimal.NewFromString(req.Quantity)
+	if err != nil {
+		return nil, errors.New("invalid quantity")
+	}
 	if qty.LessThanOrEqual(decimal.Zero) {
-		return errors.New("quantity must be positive")
+		return nil, errors.New("quantity must be positive")
 	}
 
-	return s.db.Transaction(func(tx *gorm.DB) error {
-		var sub models.SubVariant
+	var resultTx models.StockTransaction
 
-		// Row-level lock the sub_variant row
-		if err := tx.
-			Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("id = ?", subVariantID).
-			First(&sub).Error; err != nil {
+	err = db.Transaction(func(tx *gorm.DB) error {
+		// Lock sub-variant row
+		var subVariant models.SubVariant
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			First(&subVariant, "id = ? AND product_id = ?", subVariantUUID, productUUID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errors.New("sub_variant not found for product")
+			}
 			return err
 		}
 
-		newStock := sub.Stock.Add(qty)
+		// Lock product row
+		var product models.Product
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			First(&product, "id = ?", productUUID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errors.New("product not found")
+			}
+			return err
+		}
 
-		stockTx := &models.StockTransaction{
+		// Update stock
+		if txType == "IN" {
+			subVariant.Stock = subVariant.Stock.Add(qty)
+			product.TotalStock = product.TotalStock.Add(qty)
+		} else {
+			if subVariant.Stock.LessThan(qty) {
+				return errors.New("insufficient stock; cannot make stock negative")
+			}
+			subVariant.Stock = subVariant.Stock.Sub(qty)
+			product.TotalStock = product.TotalStock.Sub(qty)
+		}
+
+		if err := tx.Save(&subVariant).Error; err != nil {
+			return err
+		}
+		if err := tx.Save(&product).Error; err != nil {
+			return err
+		}
+
+		// Save transaction (store positive quantity; use type to distinguish)
+		resultTx = models.StockTransaction{
 			ID:              uuid.New(),
-			ProductID:       productID,
-			SubVariantID:    subVariantID,
+			ProductID:       product.ID,
+			SubVariantID:    subVariant.ID,
 			Quantity:        qty,
-			TransactionType: "IN",
+			TransactionType: txType,
 			TransactionDate: time.Now(),
 		}
-
-		if err := tx.Create(stockTx).Error; err != nil {
-			return err
-		}
-
-		// Update SubVariant stock
-		if err := tx.Model(&models.SubVariant{}).
-			Where("id = ?", subVariantID).
-			Update("stock", newStock).Error; err != nil {
-			return err
-		}
-
-		// Optional: update Product.TotalStock as sum
-		if err := tx.Model(&models.Product{}).
-			Where("id = ?", productID).
-			Update("total_stock", gorm.Expr("total_stock + ?", qty)).Error; err != nil {
+		if err := tx.Create(&resultTx).Error; err != nil {
 			return err
 		}
 
 		return nil
 	})
-}
 
-// RemoveStock performs a stock-out operation with negative stock prevention
-func (s *StockService) RemoveStock(productID, subVariantID uuid.UUID, qty decimal.Decimal) error {
-	if qty.LessThanOrEqual(decimal.Zero) {
-		return errors.New("quantity must be positive")
+	if err != nil {
+		return nil, err
 	}
 
-	return s.db.Transaction(func(tx *gorm.DB) error {
-		var sub models.SubVariant
-
-		// Row-level lock
-		if err := tx.
-			Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("id = ?", subVariantID).
-			First(&sub).Error; err != nil {
-			return err
-		}
-
-		if sub.Stock.LessThan(qty) {
-			return errors.New("insufficient stock, cannot go negative")
-		}
-
-		newStock := sub.Stock.Sub(qty)
-
-		stockTx := &models.StockTransaction{
-			ID:              uuid.New(),
-			ProductID:       productID,
-			SubVariantID:    subVariantID,
-			Quantity:        qty.Neg(),
-			TransactionType: "OUT",
-			TransactionDate: time.Now(),
-		}
-
-		if err := tx.Create(stockTx).Error; err != nil {
-			return err
-		}
-
-		// Update SubVariant stock
-		if err := tx.Model(&models.SubVariant{}).
-			Where("id = ?", subVariantID).
-			Update("stock", newStock).Error; err != nil {
-			return err
-		}
-
-		// Update Product.TotalStock
-		if err := tx.Model(&models.Product{}).
-			Where("id = ?", productID).
-			Update("total_stock", gorm.Expr("total_stock - ?", qty)).Error; err != nil {
-			return err
-		}
-
-		return nil
-	})
+	return &resultTx, nil
 }
 
-// StockReport returns all stock transactions between two dates (inclusive)
-func (s *StockService) StockReport(from, to string) ([]models.StockTransaction, error) {
-	var logs []models.StockTransaction
+func GetStockReport(from, to time.Time, page, limit int) (*StockReport, error) {
+	db := config.DB
 
-	err := s.db.
+	if page < 1 {
+		page = 1
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	offset := (page - 1) * limit
+
+	var txs []models.StockTransaction
+	err := db.
 		Where("transaction_date BETWEEN ? AND ?", from, to).
 		Order("transaction_date DESC").
-		Find(&logs).Error
+		Limit(limit).
+		Offset(offset).
+		Find(&txs).Error
+	if err != nil {
+		return nil, err
+	}
 
-	return logs, err
+	totalIn := decimal.Zero
+	totalOut := decimal.Zero
+
+	for _, t := range txs {
+		if t.TransactionType == "IN" {
+			totalIn = totalIn.Add(t.Quantity)
+		} else if t.TransactionType == "OUT" {
+			totalOut = totalOut.Add(t.Quantity)
+		}
+	}
+
+	report := &StockReport{
+		Transactions: txs,
+		TotalIn:      totalIn,
+		TotalOut:     totalOut,
+		Net:          totalIn.Sub(totalOut),
+	}
+
+	return report, nil
 }

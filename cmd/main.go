@@ -5,32 +5,19 @@ import (
 	"log"
 	"os"
 
+	"github.com/gin-gonic/gin"
 	"inventory-backend/config"
-	"inventory-backend/controllers"
 	"inventory-backend/migrations"
 	"inventory-backend/routes"
-	"inventory-backend/services"
-
-	"github.com/gin-gonic/gin"
 )
 
 func main() {
 	config.ConnectDatabase()
 	migrations.AutoMigrate()
 
-	db := config.DB
-
-	productService := services.NewProductService(db)
-	stockService := services.NewStockService(db)
-
-	productController := controllers.NewProductController(productService)
-	stockController := controllers.NewStockController(stockService)
-
 	router := gin.Default()
-	routes.RegisterRoutes(router, productController, stockController)
-	
-	
-	
+	routes.RegisterRoutes(router)
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"

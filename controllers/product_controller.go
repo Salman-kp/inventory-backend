@@ -4,60 +4,70 @@ import (
 	"net/http"
 	"strconv"
 
-	"inventory-backend/models"
 	"inventory-backend/services"
 
 	"github.com/gin-gonic/gin"
 )
 
-type ProductController struct {
-	service *services.ProductService
+type ErrorResponse struct {
+	Message string      `json:"message"`
+	Details interface{} `json:"details,omitempty"`
 }
 
-func NewProductController(s *services.ProductService) *ProductController {
-	return &ProductController{service: s}
-}
-
-// POST /products
-func (pc *ProductController) CreateProduct(c *gin.Context) {
-	var body models.Product
-
-	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "invalid request: " + err.Error(),
+// POST /api/products
+func CreateProductHandler(c *gin.Context) {
+	var req services.CreateProductRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Message: "invalid request body",
+			Details: err.Error(),
 		})
 		return
 	}
 
-	if err := pc.service.CreateProduct(&body); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "failed to create product: " + err.Error(),
+	product, err := services.CreateProduct(req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{
+			Message: "failed to create product",
+			Details: err.Error(),
 		})
 		return
 	}
 
-	c.JSON(http.StatusCreated, body)
+	c.JSON(http.StatusCreated, gin.H{
+		"message": "product created successfully",
+		"data":    product,
+	})
 }
 
-// GET /products?page=1&limit=10
-func (pc *ProductController) ListProducts(c *gin.Context) {
+// GET /api/products?page=1&limit=10
+func ListProductsHandler(c *gin.Context) {
 	pageStr := c.DefaultQuery("page", "1")
 	limitStr := c.DefaultQuery("limit", "10")
 
-	page, _ := strconv.Atoi(pageStr)
-	limit, _ := strconv.Atoi(limitStr)
-
-	products, err := pc.service.ListProducts(page, limit)
+	page, err := strconv.Atoi(pageStr)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "failed to list products: " + err.Error(),
+		page = 1
+	}
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil {
+		limit = 10
+	}
+
+	products, total, err := services.ListProducts(page, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Message: "failed to list products",
+			Details: err.Error(),
 		})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"data":  products,
-		"page":  page,
-		"limit": limit,
+		"data":       products,
+		"page":       page,
+		"limit":      limit,
+		"total":      total,
+		"totalPages": (total + int64(limit) - 1) / int64(limit),
 	})
 }
